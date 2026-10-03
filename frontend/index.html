@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Librería · Administración diferida</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f4f6f7;--fg:#14282b;--mut:#5b6e72;--line:#d5dde0;--card:#fff;--acc:#0f5257;--accfg:#fff;--warn:#8a5a00;--warnbg:#fff3d6;--errbg:#fde4e1;--err:#9b2318}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1a1c;--fg:#e4eef0;--mut:#8fa5a9;--line:#27393c;--card:#152326;--acc:#5cc4cc;--accfg:#06191b;--warn:#f2c46b;--warnbg:#3a2d0e;--errbg:#3b1815;--err:#ff9d92}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "IBM Plex Sans",system-ui,sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:22px;margin:0 0 4px;font-weight:600}
+.sub{color:var(--mut);margin:0 0 20px}
+nav{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:16px}
+nav button{background:none;border:0;padding:10px 14px;font:inherit;color:var(--mut);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+nav button[aria-selected=true]{color:var(--fg);border-color:var(--acc);font-weight:600}
+form{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:14px;margin-bottom:12px}
+label{display:flex;flex-direction:column;font-size:13px;color:var(--mut);gap:4px}
+input,select{font:inherit;padding:8px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg)}
+button{font:inherit}
+.btn{background:var(--acc);color:var(--accfg);border:0;border-radius:4px;padding:8px 14px;cursor:pointer;font-weight:500}
+.btn.ghost{background:none;color:var(--fg);border:1px solid var(--line)}
+.btn.sm{padding:4px 9px;font-size:13px}
+.actions{display:flex;gap:8px;align-items:end}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+#msg{padding:9px 12px;border-radius:4px;margin-bottom:12px;display:none}
+#msg.ok{display:block;background:var(--warnbg);color:var(--warn)}
+#msg.err{display:block;background:var(--errbg);color:var(--err)}
+.wrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:6px}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-weight:600;color:var(--mut);font-size:13px}
+tr:last-child td{border-bottom:0}
+td.act{text-align:right;display:flex;gap:6px;justify-content:flex-end}
+.empty{padding:20px;color:var(--mut)}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Librería</h1>
+  <p class="sub">Los cambios se envían a una cola y se aplican en la base de datos cuando se ejecutan las tareas.</p>
+  <nav id="tabs" role="tablist"></nav>
+  <form id="form"></form>
+  <div class="bar">
+    <button class="btn ghost" id="refresh">Actualizar lista</button>
+    <button class="btn" id="run">Ejecutar tareas de la cola</button>
+  </div>
+  <div id="msg" role="status"></div>
+  <div class="wrap" id="table"></div>
+</main>
+<script src="config.js"></script>
+<script>
+const CFG = {
+  books: { label: 'Libros', p: 'book', fields: [
+    { k: 'title', l: 'Título', req: 1 },
+    { k: 'author_id', l: 'Autor', sel: 'authors' },
+    { k: 'publisher_id', l: 'Editorial', sel: 'publishers' },
+    { k: 'year', l: 'Año', type: 'number' }] },
+  authors: { label: 'Autores', p: 'author', fields: [
+    { k: 'name', l: 'Nombre', req: 1 }, { k: 'country', l: 'País' }] },
+  publishers: { label: 'Editoriales', p: 'publisher', fields: [
+    { k: 'name', l: 'Nombre', req: 1 }, { k: 'city', l: 'Ciudad' }] }
+};
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let tab = 'books', rows = [], opts = {}, editing = null;
+
+async function api(path, method = 'GET', body) {
+  const r = await fetch(`${window.API_BASE}/${path}`, {
+    method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+const msg = (t, err) => { const m = $('#msg'); m.textContent = t; m.className = err ? 'err' : 'ok'; };
+
+async function load() {
+  const c = CFG[tab];
+  try {
+    rows = await api(c.p + 'List');
+    for (const f of c.fields) if (f.sel) opts[f.sel] = await api(CFG[f.sel].p + 'List');
+  } catch (e) { msg('No se pudo cargar: ' + e.message, 1); rows = []; }
+  render();
+}
+
+function render() {
+  const c = CFG[tab];
+  $('#tabs').innerHTML = Object.entries(CFG).map(([k, v]) =>
+    `<button role="tab" aria-selected="${k === tab}" data-tab="${k}">${v.label}</button>`).join('');
+  const cur = rows.find((r) => r.id === editing) || {};
+  $('#form').innerHTML = c.fields.map((f) => f.sel
+    ? `<label>${f.l}<select id="f_${f.k}"><option value="">—</option>${(opts[f.sel] || []).map((o) =>
+        `<option value="${o.id}" ${cur[f.k] === o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>`
+    : `<label>${f.l}<input id="f_${f.k}" type="${f.type || 'text'}" ${f.req ? 'required' : ''} value="${esc(cur[f.k])}"></label>`).join('')
+    + `<div class="actions"><button class="btn" type="submit">${editing ? 'Enviar cambio' : 'Enviar nuevo'}</button>`
+    + (editing ? '<button class="btn ghost" type="button" id="cancel">Cancelar</button>' : '') + '</div>';
+  const cols = c.fields.map((f) => ({ l: f.l, get: (r) => f.sel ? r[f.k.replace('_id', '_name')] : r[f.k] }));
+  $('#table').innerHTML = rows.length
+    ? `<table><thead><tr><th>ID</th>${cols.map((x) => `<th>${x.l}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map((r) =>
+        `<tr><td>${r.id}</td>${cols.map((x) => `<td>${esc(x.get(r))}</td>`).join('')}<td class="act">
+        <button class="btn ghost sm" data-edit="${r.id}">Editar</button>
+        <button class="btn ghost sm" data-del="${r.id}">Eliminar</button></td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No hay registros. Envíe uno nuevo y ejecute las tareas de la cola.</div>';
+}
+
+$('#tabs').onclick = (e) => { const t = e.target.dataset.tab; if (t) { tab = t; editing = null; $('#msg').className = ''; load(); } };
+$('#table').onclick = async (e) => {
+  const c = CFG[tab];
+  if (e.target.dataset.edit) { editing = +e.target.dataset.edit; render(); }
+  if (e.target.dataset.del && confirm('¿Enviar la eliminación a la cola?')) {
+    try { const r = await api(c.p + 'Delete', 'DELETE', { id: +e.target.dataset.del });
+      msg(`Eliminación encolada en "${r.queue}". Ejecute las tareas para aplicarla.`); }
+    catch (err) { msg(err.message, 1); }
+  }
+};
+$('#form').onclick = (e) => { if (e.target.id === 'cancel') { editing = null; render(); } };
+$('#form').onsubmit = async (e) => {
+  e.preventDefault();
+  const c = CFG[tab], d = {};
+  c.fields.forEach((f) => (d[f.k] = $('#f_' + f.k).value));
+  try {
+    const r = editing ? await api(c.p + 'Update', 'PUT', { ...d, id: editing }) : await api(c.p + 'Insert', 'POST', d);
+    msg(`Cambio encolado en "${r.queue}" (${r.op}). Aún no está en la base de datos: ejecute las tareas.`);
+    editing = null; render();
+  } catch (err) { msg(err.message, 1); }
+};
+$('#refresh').onclick = load;
+$('#run').onclick = async () => {
+  try {
+    const r = await api(CFG[tab].p + 'Tasks', 'POST');
+    msg(`Tareas ejecutadas: ${r.processed} mensajes (${r.insert} nuevos, ${r.update} cambios, ${r.delete} eliminaciones).`);
+    await load();
+  } catch (err) { msg(err.message, 1); }
+};
+load();
+</script>
+</body>
+</html>

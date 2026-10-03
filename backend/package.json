@@ -1,0 +1,8 @@
+{
+  "name": "bookstore-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "dev": "netlify dev" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "amqplib": "^0.10.4", "pg": "^8.12.0" }
+}
